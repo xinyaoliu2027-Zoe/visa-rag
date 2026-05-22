@@ -4,6 +4,7 @@ Run locally:
     uvicorn src.main:app --reload --port 8000
 
 Endpoints:
+    GET  /                        web UI
     GET  /health                  liveness
     POST /ask     {question}      RAG answer
     POST /timeline {program_end_date, is_stem_eligible}  deterministic OPT math
@@ -12,10 +13,14 @@ Endpoints:
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
+
+WEB_DIR = Path(__file__).parent / "web"
 
 from src.generation.rag import Answer, generate_answer
 from src.rules.opt_timeline import TimelineInput, compute_timeline
@@ -69,6 +74,12 @@ class TimelineResponse(BaseModel):
         "USCIS may exercise discretion outside the regulatory window. "
         "Verify with your DSO."
     )
+
+
+@app.get("/", response_class=HTMLResponse)
+def index() -> str:
+    """Serve the web UI. Read on each request so edits show without a restart."""
+    return (WEB_DIR / "index.html").read_text(encoding="utf-8")
 
 
 @app.get("/health")

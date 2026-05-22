@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Visa RAG — F-1 / OPT Assistant</title>
+<style>
+  :root {
+    --bg: #f4f6f9;
+    --card: #ffffff;
+    --ink: #1f2937;
+    --muted: #6b7280;
+    --line: #e5e7eb;
+    --accent: #2563eb;
+    --accent-dark: #1d4ed8;
+    --green: #047857;
+    --amber: #b45309;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    line-height: 1.55;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 32px 20px 80px; }
+  header h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  header p { color: var(--muted); margin: 0 0 16px; font-size: 0.92rem; }
+  .disclaimer {
+    background: #fff7ed; border: 1px solid #fed7aa; color: var(--amber);
+    border-radius: 8px; padding: 10px 14px; font-size: 0.85rem; margin-bottom: 20px;
+  }
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 12px; padding: 20px; margin-bottom: 18px;
+  }
+  textarea {
+    width: 100%; border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px; font: inherit; resize: vertical; min-height: 70px;
+  }
+  textarea:focus { outline: 2px solid var(--accent); border-color: var(--accent); }
+  .row { display: flex; gap: 10px; align-items: center; margin-top: 12px; }
+  button {
+    background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+    padding: 10px 22px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button:hover { background: var(--accent-dark); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .examples { margin-top: 14px; }
+  .examples span { font-size: 0.82rem; color: var(--muted); margin-right: 6px; }
+  .chip {
+    display: inline-block; background: #eef2ff; color: var(--accent-dark);
+    border: 1px solid #c7d2fe; border-radius: 999px; padding: 4px 12px;
+    font-size: 0.82rem; cursor: pointer; margin: 4px 4px 0 0;
+  }
+  .chip:hover { background: #e0e7ff; }
+  #result { display: none; }
+  .badge {
+    display: inline-block; font-size: 0.72rem; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.04em;
+    padding: 3px 9px; border-radius: 999px; margin-right: 8px;
+  }
+  .badge.answered, .badge.timeline { background: #ecfdf5; color: var(--green); }
+  .badge.refused, .badge.needs_dates { background: #fff7ed; color: var(--amber); }
+  .meta { font-size: 0.8rem; color: var(--muted); margin-bottom: 12px; }
+  .answer h3 { font-size: 1.05rem; margin: 16px 0 6px; }
+  .answer p { margin: 8px 0; }
+  .answer ul { margin: 8px 0; padding-left: 22px; }
+  .answer hr { border: 0; border-top: 1px solid var(--line); margin: 14px 0; }
+  .citations { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 14px; }
+  .citations h4 { font-size: 0.9rem; margin: 0 0 8px; color: var(--muted); }
+  .cite { font-size: 0.85rem; margin-bottom: 8px; }
+  .cite a { color: var(--accent); word-break: break-all; }
+  .tier { font-size: 0.72rem; color: var(--muted); }
+  .spinner {
+    display: inline-block; width: 16px; height: 16px; border: 2px solid #c7d2fe;
+    border-top-color: var(--accent); border-radius: 50%;
+    animation: spin 0.7s linear infinite; vertical-align: middle;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  footer { text-align: center; color: var(--muted); font-size: 0.78rem; margin-top: 30px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Visa RAG — F-1 / OPT Assistant</h1>
+    <p>Ask about F-1 student status, on/off-campus work, OPT, and STEM OPT. Every answer is grounded in official sources.</p>
+  </header>
+
+  <div class="disclaimer">
+    Informational only — not legal advice. Always verify with your DSO and a licensed immigration attorney.
+  </div>
+
+  <div class="card">
+    <textarea id="question" placeholder="e.g. How long is post-completion OPT?"></textarea>
+    <div class="row">
+      <button id="askBtn" onclick="ask()">Ask</button>
+      <span id="status" class="meta" style="margin:0;"></span>
+    </div>
+    <div class="examples">
+      <span>Try:</span>
+      <span class="chip" onclick="useExample(this)">How long is post-completion OPT?</span>
+      <span class="chip" onclick="useExample(this)">When can an F-1 student work off campus?</span>
+      <span class="chip" onclick="useExample(this)">I finish my program on 2026-12-18. When can I file for OPT?</span>
+    </div>
+  </div>
+
+  <div id="result" class="card">
+    <div id="meta" class="meta"></div>
+    <div id="answer" class="answer"></div>
+    <div id="citations" class="citations" style="display:none;">
+      <h4>Sources</h4>
+      <div id="citeList"></div>
+    </div>
+  </div>
+
+  <footer>Visa RAG &middot; retrieval-augmented, citation-grounded</footer>
+</div>
+
+<script>
+function useExample(el) {
+  document.getElementById('question').value = el.textContent;
+  ask();
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function inline(s) {
+  return s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+          .replace(/\*(.+?)\*/g, '<em>$1</em>');
+}
+
+// Minimal markdown renderer for the answer text (headings, bold, lists, hr).
+function renderMarkdown(md) {
+  const lines = escapeHtml(md).split('\n');
+  const out = [];
+  let inList = false;
+  const closeList = () => { if (inList) { out.push('</ul>'); inList = false; } };
+  for (const line of lines) {
+    const t = line.trim();
+    if (/^-{3,}$/.test(t)) { closeList(); out.push('<hr>'); }
+    else if (/^#{1,6}\s/.test(t)) { closeList(); out.push('<h3>' + inline(t.replace(/^#{1,6}\s/, '')) + '</h3>'); }
+    else if (/^[-*]\s/.test(t)) { if (!inList) { out.push('<ul>'); inList = true; } out.push('<li>' + inline(t.slice(2)) + '</li>'); }
+    else if (t === '') { closeList(); }
+    else { closeList(); out.push('<p>' + inline(line) + '</p>'); }
+  }
+  closeList();
+  return out.join('');
+}
+
+async function ask() {
+  const q = document.getElementById('question').value.trim();
+  if (q.length < 3) { return; }
+  const btn = document.getElementById('askBtn');
+  const status = document.getElementById('status');
+  const result = document.getElementById('result');
+  btn.disabled = true;
+  status.innerHTML = '<span class="spinner"></span> Thinking...';
+  result.style.display = 'none';
+
+  try {
+    const resp = await fetch('/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: q })
+    });
+    if (!resp.ok) { throw new Error('Server returned ' + resp.status); }
+    const data = await resp.json();
+
+    document.getElementById('meta').innerHTML =
+      '<span class="badge ' + data.mode + '">' + data.mode + '</span>' +
+      'confidence: ' + data.confidence;
+    document.getElementById('answer').innerHTML = renderMarkdown(data.text);
+
+    const citeBox = document.getElementById('citations');
+    const citeList = document.getElementById('citeList');
+    if (data.citations && data.citations.length) {
+      citeList.innerHTML = data.citations.map(c =>
+        '<div class="cite">[' + c.n + '] ' + escapeHtml(c.section_path) +
+        ' <span class="tier">(' + escapeHtml(c.publisher) + ', Tier ' + c.tier + ')</span><br>' +
+        '<a href="' + encodeURI(c.source_url) + '" target="_blank" rel="noopener">' +
+        escapeHtml(c.source_url) + '</a></div>'
+      ).join('');
+      citeBox.style.display = 'block';
+    } else {
+      citeBox.style.display = 'none';
+    }
+    result.style.display = 'block';
+    status.textContent = '';
+  } catch (err) {
+    status.textContent = 'Error: ' + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+document.getElementById('question').addEventListener('keydown', function (e) {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { ask(); }
+});
+</script>
+</body>
+</html>
