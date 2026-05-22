@@ -1,126 +1,154 @@
-# Visa RAG — Informational Assistant for F-1 / OPT / STEM OPT
+# Visa RAG — F-1 / OPT / STEM OPT Assistant
 
-> **Not legal advice.** Informational only. Always verify with your school's DSO and consult a licensed immigration attorney for legal decisions.
+> **Informational only — not legal advice.** Always verify with your school's DSO
+> and a licensed immigration attorney before making decisions.
 
-A retrieval-augmented assistant for international students navigating F-1, OPT, and STEM OPT regulations. The system answers questions only when it can cite authoritative sources (USCIS Policy Manual, 8 CFR, SEVP guidance, Federal Register), refuses out-of-scope questions, and uses a deterministic rules engine — not the LLM — for any date or window calculation.
+A retrieval-augmented assistant that helps international students navigate F-1
+student status, on/off-campus employment, OPT, and the STEM OPT extension.
 
-## Design pillars
+Unlike a general chatbot, it is **built for a high-stakes domain**: every answer
+is grounded in official sources with passage-level citations, the system refuses
+when the sources don't cover a question, all date arithmetic is done by a
+deterministic rules engine (never the LLM), and it tracks the user's personal
+case so it can say *"here's where you are and what to do next."*
 
-1. **Citation or refusal.** Every claim ties to a passage; no source → no answer.
-2. **Two-tier sources.** Authoritative (USCIS / 8 CFR / SEVP) vs. practitioner (NAFSA, OISS). Answers always identify which tier is being cited.
-3. **Rules out of LLM.** Date arithmetic (OPT windows, STEM extension cutoffs, unemployment counters) lives in deterministic Python, not in the model.
-4. **Post-generation verification.** Every answer is re-checked against retrieved passages; low confidence → refusal.
+![Web UI](docs/screenshot_web_ui.png)
+
+## What it does
+
+- **Grounded Q&A** — answers F-1/OPT questions using only retrieved official
+  passages, with inline `[n]` citations to the exact USCIS / 8 CFR / SEVP source.
+- **Refuses when it should** — out-of-scope or unsupported questions get a
+  refusal, not a confident hallucination.
+- **Deterministic timeline** — date/deadline questions are routed to a rules
+  engine that computes OPT/STEM filing windows from the cited regulations.
+- **Personal case tracker** — a saved profile drives a progress view: current
+  stage, next action, and countdowns to upcoming deadlines.
+- **Conversation-aware** — when a message reveals a case change ("I just filed
+  my I-765"), the app *suggests* a profile update for the user to confirm.
 
 ## Architecture
 
+The query pipeline routes each question to one of two paths — the LLM is used
+for *understanding*, never for date math:
+
+```mermaid
+flowchart TD
+    Q[User question] --> INT{Intent}
+    INT -->|timeline| EXT[LLM extracts<br/>program date]
+    EXT --> RULES[Deterministic<br/>rules engine]
+    RULES --> ANS[Answer]
+    INT -->|general| RET[Hybrid retrieval<br/>pgvector + lexical, RRF]
+    RET --> RR[Cohere rerank]
+    RR --> GATE{Passages<br/>answer it?}
+    GATE -->|no| REF[Refuse]
+    GATE -->|yes| GEN[LLM generation<br/>with citations]
+    GEN --> VER{Self-check:<br/>grounded?}
+    VER -->|no| REF
+    VER -->|yes| ANS
 ```
-[User Question]
-      │
-      ▼
-[Profile + intent classifier] ──► is this a date/window question?
-      │                                      │
-      │                                      ▼
-      │                            [Rules engine] ──► deterministic answer
-      ▼
-[Hybrid retrieval]  (BM25 + dense)
-      │
-      ▼
-[Cohere reranker]
-      │
-      ▼
-[LLM generation with inline citations]
-      │
-      ▼
-[Self-check verifier] ──► if unsupported, fall back to refusal
-      │
-      ▼
-[Answer + citations + tier labels]
+
+**Ingestion** (offline): official PDFs → text extraction (`pypdf`) →
+section-aware chunking → BGE embeddings → stored in Postgres/pgvector with a
+two-tier label (authoritative vs. practitioner) and provenance metadata.
+
+**Serving**: a FastAPI app and a Postgres + pgvector database run as two
+containers via Docker Compose; the app reaches the database over the compose
+network.
+
+## Evaluation
+
+A golden-set harness (`src/eval/`) measures three metrics across general,
+timeline, and deliberately out-of-scope questions:
+
+| Metric | Result |
+|---|---|
+| Routing accuracy (right pipeline / mode) | 16/16 = 100% |
+| Key-fact coverage (answers contain expected facts) | 15/15 = 100% |
+| Out-of-scope refusal rate | 4/4 = 100% |
+
+The harness first surfaced a real bug: out-of-scope refusal was only **50%** —
+immigration-adjacent questions (H-1B cap, marriage green card) slipped past the
+embedding relevance filter. Adding an LLM **answerability gate** (which reads the
+retrieved passages and judges whether they actually contain the answer) raised
+refusal to **100%** with no in-scope regressions. See `docs/eval_results.md`.
+
+> The 16-question set is a seed; it is designed to grow toward ~100 with
+> adversarial cases.
+
+## Tech stack
+
+- **Backend**: Python, FastAPI
+- **Database**: PostgreSQL + pgvector (HNSW index)
+- **Retrieval**: hybrid dense + lexical search, Reciprocal Rank Fusion, Cohere rerank
+- **Embeddings**: BGE (`sentence-transformers`)
+- **Generation**: Claude (Anthropic API)
+- **Ingestion**: `pypdf`, section-aware chunking
+- **Frontend**: single-page HTML/CSS/JS, served by FastAPI
+- **Infra**: Docker Compose
+
+## Getting started
+
+```bash
+cp .env.example .env                  # add ANTHROPIC_API_KEY and COHERE_API_KEY
+docker compose up -d                  # starts postgres (schema auto-applied) + app
+curl http://localhost:8000/health     # -> {"status":"ok"}
+```
+
+Then open **http://localhost:8000/**. To load the knowledge base, download
+official source PDFs and run the ingestion scripts (see `docs/添加文档手册.md`):
+
+```bash
+docker compose exec app python -m src.ingestion.parse_pdf \
+    data/raw/<doc>.pdf --output data/processed/<doc>.jsonl
+docker compose exec app python -m src.ingestion.embed_and_index \
+    --jsonl data/processed/<doc>.jsonl --prefix "<citation prefix>" \
+    --source-url "<url>" --title "<title>" --publisher USCIS --tier 1
+```
+
+Run the evaluation suite:
+
+```bash
+docker compose exec app python -m src.eval.run_eval
 ```
 
 ## Project layout
 
 ```
 visa_rag/
-├── README.md                    # this file
-├── WEEK1_CHECKLIST.md           # day-by-day week 1 plan
-├── requirements.txt
-├── .env.example
-├── .gitignore
-├── db/
-│   └── init.sql                 # pgvector schema
+├── db/init.sql                  # pgvector schema (documents, chunks, profile)
 ├── src/
-│   ├── main.py                  # FastAPI entrypoint
-│   ├── ingestion/
-│   │   ├── parse_pdf.py         # Unstructured-based PDF parsing
-│   │   ├── chunk.py             # section-aware chunking
-│   │   └── embed_and_index.py   # embed + insert into pgvector
-│   ├── retrieval/
-│   │   ├── hybrid_search.py     # BM25 + dense fusion
-│   │   └── rerank.py            # Cohere rerank
-│   ├── generation/
-│   │   └── rag.py               # answer with citation + self-check
-│   └── rules/
-│       └── opt_timeline.py      # deterministic OPT/STEM math
-├── eval/
-│   └── golden_set.jsonl         # 100-question test set (you build this)
-├── data/
-│   ├── raw/                     # downloaded PDFs (gitignored)
-│   ├── processed/               # parsed JSONL (gitignored)
-│   └── sources.md               # provenance log
-└── docs/
-    └── architecture.png         # add later
+│   ├── main.py                  # FastAPI app + web UI route
+│   ├── ingestion/               # parse_pdf, chunk, embed_and_index
+│   ├── retrieval/               # hybrid_search, rerank
+│   ├── generation/rag.py        # intent routing, RAG, self-check, answerability gate
+│   ├── rules/opt_timeline.py    # deterministic OPT/STEM date math
+│   ├── profile/                 # store, progress, infer (conversation-driven)
+│   ├── eval/                    # golden set + harness
+│   └── web/index.html           # single-page frontend
+└── docs/                        # eval results, milestones, guides
 ```
 
-## Getting started
+## Design decisions
 
-See **WEEK1_CHECKLIST.md** for the day-by-day plan. The TL;DR:
+- **HNSW, not IVFFlat** — IVFFlat partitions vectors into lists and probes only
+  a few; on a small corpus most lists are empty and recall is unstable. HNSW is
+  reliable at any corpus size.
+- **LLM understands, rules engine computes** — immigration deadlines are
+  high-stakes and LLMs miscompute dates; the LLM only extracts parameters, all
+  date math is deterministic Python that cites its CFR source.
+- **Answerability gate + self-check** — two independent "should we answer?"
+  checks: one before generation (do the passages contain the answer?) and one
+  after (is the drafted answer grounded?).
+- **Detect → suggest → confirm** — the app never silently changes the user's
+  case state; it surfaces a suggestion and the user confirms.
 
-```bash
-cd visa_rag
-cp .env.example .env                 # fill in ANTHROPIC_API_KEY, optionally COHERE_API_KEY
-docker compose up -d                 # start postgres (with schema auto-applied) + app
-docker compose logs -f app           # tail logs; wait for "Uvicorn running on ..."
-curl http://localhost:8000/health    # → {"status":"ok"}
-```
+## Limitations
 
-The Postgres container auto-runs `db/init.sql` on first start (only when the
-data volume is empty). The app container hot-reloads when you edit `./src`.
-
-To run ingestion scripts inside the container:
-
-```bash
-docker compose exec app python -m src.ingestion.parse_pdf \
-    data/raw/uscis_vol2_partf_ch5.pdf \
-    --output data/processed/uscis_vol2_partf_ch5.jsonl
-
-docker compose exec app python -m src.ingestion.embed_and_index \
-    --jsonl data/processed/uscis_vol2_partf_ch5.jsonl \
-    --prefix "Vol 2, Part F, Ch 5" \
-    --source-url "https://www.uscis.gov/policy-manual/volume-2-part-f-chapter-5" \
-    --title "USCIS Policy Manual: F-1 Students, Employment" \
-    --publisher USCIS --tier 1
-```
-
-Reset everything (drops the database):
-
-```bash
-docker compose down -v
-```
-
-### Working without Docker
-
-If you'd rather not use Docker, you can still run the stack natively:
-
-```bash
-uv venv && source .venv/bin/activate
-uv pip install -r requirements.txt
-# Use a local Postgres or a one-off container for just the DB:
-docker run -d --name visa_pg -e POSTGRES_PASSWORD=dev -p 5432:5432 \
-  -v "$PWD/db/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro" \
-  pgvector/pgvector:pg16
-uvicorn src.main:app --reload
-```
-
-## Status
-
-Week 1 of 10 — skeleton + ingestion.
+- Single-user profile (no authentication) — multi-user accounts are a deliberate
+  future step.
+- Knowledge base currently spans 5 official sources; section detection is coarse
+  for non-Policy-Manual PDFs.
+- The evaluation set is a 16-question seed.
+- Runs locally via Docker; not yet deployed to a public URL.
+- **Informational only — not legal advice.**
