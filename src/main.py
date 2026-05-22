@@ -12,6 +12,7 @@ Endpoints:
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import date
 from pathlib import Path
 
@@ -23,6 +24,8 @@ from pydantic import BaseModel, Field
 WEB_DIR = Path(__file__).parent / "web"
 
 from src.generation.rag import Answer, generate_answer
+from src.profile.progress import compute_progress
+from src.profile.store import get_profile, save_profile
 from src.rules.opt_timeline import TimelineInput, compute_timeline
 
 load_dotenv()
@@ -126,3 +129,44 @@ def timeline(req: TimelineRequest) -> TimelineResponse:
             for m in result.milestones
         ],
     )
+
+
+# --- User profile & progress -------------------------------------------------
+
+VALID_STAGES = {"studying", "opt_filed", "opt_active",
+                "stem_filed", "stem_active", "done"}
+
+
+class ProfileRequest(BaseModel):
+    program_end_date: date
+    is_stem_eligible: bool = False
+    current_stage: str = "studying"
+
+
+@app.get("/profile")
+def read_profile() -> dict:
+    """Return the saved F-1 case profile, if any."""
+    profile = get_profile()
+    return {"has_profile": profile is not None, "profile": profile}
+
+
+@app.put("/profile")
+def write_profile(req: ProfileRequest) -> dict:
+    """Create or update the user's F-1 case profile."""
+    stage = req.current_stage if req.current_stage in VALID_STAGES else "studying"
+    profile = save_profile(req.program_end_date, req.is_stem_eligible, stage)
+    return {"has_profile": True, "profile": profile}
+
+
+@app.get("/progress")
+def read_progress() -> dict:
+    """Return the personalised progress view computed from the saved profile."""
+    profile = get_profile()
+    if profile is None:
+        return {"has_profile": False}
+    prog = compute_progress(
+        program_end_date=date.fromisoformat(profile["program_end_date"]),
+        is_stem_eligible=profile["is_stem_eligible"],
+        current_stage=profile["current_stage"],
+    )
+    return {"has_profile": True, "progress": asdict(prog)}

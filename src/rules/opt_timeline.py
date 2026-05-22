@@ -7,6 +7,9 @@ LLMs misadd dates with shocking frequency, and OPT date math is high stakes
 CFR or USCIS Policy Manual section it implements; if regs change, update both
 the constant and the citation in one place.
 
+Each milestone also carries a stable `key` so other modules (e.g. the progress
+view) can look up specific dates without string-matching the human label.
+
 CAVEATS
 -------
 - These calculations assume standard post-completion OPT (no extension other
@@ -55,6 +58,7 @@ class TimelineMilestone:
     latest: date | None
     regulatory_citation: str
     notes: str = ""
+    key: str = ""                    # stable identifier for programmatic lookup
 
 
 @dataclass
@@ -84,12 +88,14 @@ def compute_timeline(inp: TimelineInput) -> TimelineResult:
 
     milestones = [
         TimelineMilestone(
+            key="opt_file_earliest",
             label="Earliest date you may file Form I-765 for post-completion OPT",
             earliest=file_window_start,
             latest=None,
             regulatory_citation="8 CFR §214.2(f)(11)(i)(B)",
         ),
         TimelineMilestone(
+            key="opt_file_latest",
             label="Latest date you may file Form I-765",
             earliest=None,
             latest=file_window_end,
@@ -97,12 +103,14 @@ def compute_timeline(inp: TimelineInput) -> TimelineResult:
             notes="USCIS must receive the application by this date.",
         ),
         TimelineMilestone(
+            key="opt_start_window",
             label="Allowed window for OPT start date you select on I-765",
             earliest=opt_start_earliest,
             latest=opt_start_latest,
             regulatory_citation="8 CFR §214.2(f)(11)(i)(B)",
         ),
         TimelineMilestone(
+            key="opt_end_latest",
             label="Latest possible OPT end date (12 months from latest start)",
             earliest=None,
             latest=latest_opt_end,
@@ -116,6 +124,7 @@ def compute_timeline(inp: TimelineInput) -> TimelineResult:
         stem_end = latest_opt_end + timedelta(days=STEM_EXTENSION_DAYS)
         milestones.extend([
             TimelineMilestone(
+                key="stem_file_window",
                 label="STEM extension I-765 filing window",
                 earliest=stem_apply_earliest,
                 latest=stem_apply_latest,
@@ -123,12 +132,14 @@ def compute_timeline(inp: TimelineInput) -> TimelineResult:
                 notes="Must file before initial OPT EAD expires.",
             ),
             TimelineMilestone(
+                key="stem_end_latest",
                 label="Latest possible STEM OPT end date",
                 earliest=None,
                 latest=stem_end,
                 regulatory_citation="8 CFR §214.2(f)(10)(ii)(C)(2)",
             ),
             TimelineMilestone(
+                key="unemployment_cap",
                 label="Cumulative unemployment cap (initial + STEM)",
                 earliest=None,
                 latest=None,
@@ -138,6 +149,7 @@ def compute_timeline(inp: TimelineInput) -> TimelineResult:
         ])
     else:
         milestones.append(TimelineMilestone(
+            key="unemployment_cap",
             label="Unemployment cap during initial OPT",
             earliest=None,
             latest=None,
@@ -170,7 +182,7 @@ if __name__ == "__main__":
     print(result.summary)
     print()
     for m in result.milestones:
-        print(f"- {m.label}")
+        print(f"- [{m.key}] {m.label}")
         if m.earliest:
             print(f"    earliest: {_fmt(m.earliest)}")
         if m.latest:

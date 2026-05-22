@@ -60,6 +60,16 @@ CREATE TABLE IF NOT EXISTS visa.ingestion_runs (
     notes           TEXT
 );
 
+-- Single-user profile: the F-1 case the app tracks. One row (id = 1).
+-- Multi-user accounts / auth are a deliberate future step.
+CREATE TABLE IF NOT EXISTS visa.user_profiles (
+    id               INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    program_end_date DATE NOT NULL,
+    is_stem_eligible BOOLEAN NOT NULL DEFAULT FALSE,
+    current_stage    TEXT NOT NULL DEFAULT 'studying',
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- View used by the app to retrieve chunk text + document context in one query.
 CREATE OR REPLACE VIEW visa.v_chunks_with_source AS
 SELECT

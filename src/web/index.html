@@ -80,6 +80,38 @@
   }
   @keyframes spin { to { transform: rotate(360deg); } }
   footer { text-align: center; color: var(--muted); font-size: 0.78rem; margin-top: 30px; }
+  .section-title { font-size: 1.1rem; margin: 0 0 14px; }
+  .profile-form { display: flex; flex-wrap: wrap; gap: 14px 18px; align-items: flex-end; }
+  .profile-form label { display: flex; flex-direction: column; font-size: 0.8rem; color: var(--muted); gap: 4px; }
+  .profile-form label.checkbox { flex-direction: row; align-items: center; gap: 6px; color: var(--ink); font-size: 0.9rem; }
+  .profile-form input[type=date], .profile-form select {
+    border: 1px solid var(--line); border-radius: 7px; padding: 8px; font: inherit; color: var(--ink);
+  }
+  .progress { margin-top: 20px; border-top: 1px solid var(--line); padding-top: 18px; }
+  .next-action { border-radius: 10px; padding: 14px 16px; margin-bottom: 18px; }
+  .next-action .na-title { font-weight: 700; margin-bottom: 4px; }
+  .next-action .na-detail { font-size: 0.9rem; }
+  .na-info { background: #eff6ff; border: 1px solid #bfdbfe; }
+  .na-action { background: #ecfdf5; border: 1px solid #a7f3d0; }
+  .na-warning { background: #fff7ed; border: 1px solid #fed7aa; }
+  .stage-tracker { margin-bottom: 18px; }
+  .stage-row { display: flex; align-items: center; gap: 10px; padding: 5px 0; font-size: 0.92rem; }
+  .stage-dot {
+    width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center;
+    justify-content: center; font-size: 0.7rem; font-weight: 700; flex-shrink: 0;
+  }
+  .stage-done .stage-dot { background: var(--green); color: #fff; }
+  .stage-current .stage-dot { background: var(--accent); color: #fff; }
+  .stage-upcoming .stage-dot { background: #e5e7eb; color: var(--muted); }
+  .stage-current { font-weight: 600; }
+  .stage-upcoming { color: var(--muted); }
+  .upcoming-title { font-size: 0.85rem; color: var(--muted); margin-bottom: 8px; }
+  .date-row { display: flex; align-items: baseline; gap: 10px; padding: 4px 0; font-size: 0.9rem; }
+  .days-badge {
+    background: #eef2ff; color: var(--accent-dark); border-radius: 999px;
+    padding: 2px 9px; font-size: 0.78rem; font-weight: 600; white-space: nowrap;
+  }
+  .date-iso { color: var(--muted); font-size: 0.82rem; }
 </style>
 </head>
 <body>
@@ -91,6 +123,35 @@
 
   <div class="disclaimer">
     Informational only — not legal advice. Always verify with your DSO and a licensed immigration attorney.
+  </div>
+
+  <div class="card" id="caseCard">
+    <h2 class="section-title">My Case</h2>
+    <div class="profile-form">
+      <label>Program completion date
+        <input type="date" id="progEnd">
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" id="isStem"> STEM-eligible degree
+      </label>
+      <label>Current stage
+        <select id="stage">
+          <option value="studying">In F-1 study</option>
+          <option value="opt_filed">OPT application filed</option>
+          <option value="opt_active">On post-completion OPT</option>
+          <option value="stem_filed">STEM extension filed</option>
+          <option value="stem_active">On STEM OPT</option>
+          <option value="done">Journey complete</option>
+        </select>
+      </label>
+      <button onclick="saveProfile()">Save my case</button>
+      <span id="profileStatus" class="meta" style="margin:0;"></span>
+    </div>
+    <div id="progress" class="progress" style="display:none;">
+      <div id="nextAction" class="next-action"></div>
+      <div id="stageTracker" class="stage-tracker"></div>
+      <div id="upcoming"></div>
+    </div>
   </div>
 
   <div class="card">
@@ -201,6 +262,77 @@ async function ask() {
 document.getElementById('question').addEventListener('keydown', function (e) {
   if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { ask(); }
 });
+
+// --- My Case: profile + progress ---
+
+async function loadProfile() {
+  try {
+    const data = await (await fetch('/profile')).json();
+    if (data.has_profile && data.profile) {
+      document.getElementById('progEnd').value = data.profile.program_end_date;
+      document.getElementById('isStem').checked = data.profile.is_stem_eligible;
+      document.getElementById('stage').value = data.profile.current_stage;
+      loadProgress();
+    }
+  } catch (e) { /* no profile yet — leave the form empty */ }
+}
+
+async function saveProfile() {
+  const progEnd = document.getElementById('progEnd').value;
+  const status = document.getElementById('profileStatus');
+  if (!progEnd) { status.textContent = 'Enter your program completion date first.'; return; }
+  status.textContent = 'Saving...';
+  try {
+    const resp = await fetch('/profile', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        program_end_date: progEnd,
+        is_stem_eligible: document.getElementById('isStem').checked,
+        current_stage: document.getElementById('stage').value
+      })
+    });
+    if (!resp.ok) { throw new Error('save failed (' + resp.status + ')'); }
+    status.textContent = 'Saved.';
+    loadProgress();
+  } catch (e) { status.textContent = 'Error: ' + e.message; }
+}
+
+async function loadProgress() {
+  try {
+    const data = await (await fetch('/progress')).json();
+    if (data.has_profile && data.progress) { renderProgress(data.progress); }
+  } catch (e) { /* ignore */ }
+}
+
+function renderProgress(p) {
+  const na = document.getElementById('nextAction');
+  na.className = 'next-action na-' + p.next_urgency;
+  na.innerHTML = '<div class="na-title">Next: ' + escapeHtml(p.next_title) + '</div>' +
+                 '<div class="na-detail">' + escapeHtml(p.next_detail) + '</div>';
+
+  document.getElementById('stageTracker').innerHTML = p.stages.map(function (s) {
+    const sym = s.status === 'done' ? '&#10003;' : (s.status === 'current' ? '&#9679;' : '');
+    return '<div class="stage-row stage-' + s.status + '">' +
+           '<span class="stage-dot">' + sym + '</span>' + escapeHtml(s.label) + '</div>';
+  }).join('');
+
+  const up = document.getElementById('upcoming');
+  if (p.upcoming_dates && p.upcoming_dates.length) {
+    up.innerHTML = '<div class="upcoming-title">Upcoming deadlines</div>' +
+      p.upcoming_dates.map(function (d) {
+        return '<div class="date-row"><span class="days-badge">in ' + d.days_until +
+               ' days</span><span>' + escapeHtml(d.label) +
+               '</span><span class="date-iso">' + d.date + '</span></div>';
+      }).join('');
+  } else {
+    up.innerHTML = '';
+  }
+
+  document.getElementById('progress').style.display = 'block';
+}
+
+loadProfile();
 </script>
 </body>
 </html>
