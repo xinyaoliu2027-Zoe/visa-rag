@@ -84,6 +84,18 @@ Respond with ONLY a JSON object — no code fences, no commentary:
   about the STEM OPT extension; otherwise false."""
 
 
+ANSWERABILITY_SYSTEM = """You decide whether a set of passages contains enough information to answer a question about F-1 student visa / OPT.
+
+Respond with ONLY a JSON object — no code fences, no commentary:
+{"answerable": true} or {"answerable": false}
+
+- true: the passages directly contain the information needed to answer the question.
+- false: the passages are off-topic, only tangentially related, or simply do not
+  contain the answer (e.g. the question is about H-1B, green cards, tourist visas,
+  or other topics outside F-1 student status and practical training).
+When in doubt, answer false."""
+
+
 @dataclass
 class Citation:
     n: int
@@ -225,6 +237,25 @@ def _answer_timeline(question: str) -> Answer:
     )
 
 
+# --- Answerability gate ------------------------------------------------------
+
+def _can_answer(question: str, passages: str) -> bool:
+    """Decide whether the retrieved passages actually contain the answer.
+
+    The embedding relevance score is only a similarity proxy — it lets some
+    topically-adjacent but out-of-scope questions through. This gate asks the
+    LLM to read the passages and judge answerability directly."""
+    raw = _call_llm(
+        ANSWERABILITY_SYSTEM,
+        f"PASSAGES:\n{passages}\n\nQUESTION: {question}",
+        max_tokens=50,
+    )
+    data = _extract_json(raw)
+    if data is None:
+        return False  # conservative: if unsure, don't answer
+    return bool(data.get("answerable"))
+
+
 # --- Self-check ---------------------------------------------------------------
 
 def _verify(answer: str, passages: str) -> tuple[bool, list[str]]:
@@ -277,14 +308,28 @@ def generate_answer(question: str) -> Answer:
             debug={"reason": "low_relevance", "top_score": top_score},
         )
 
-    # 2. Generate.
+    # 2. Answerability gate — do the retrieved passages actually answer this?
     passages_block = _format_passages(hits)
+    if not _can_answer(question, passages_block):
+        return Answer(
+            mode="refused",
+            text=(
+                "The retrieved passages don't actually address this question, so "
+                "I'm not going to answer. Please consult your DSO or an immigration "
+                "attorney. This is informational only, not legal advice."
+            ),
+            citations=[],
+            confidence="low",
+            debug={"reason": "passages_do_not_answer"},
+        )
+
+    # 3. Generate.
     draft = _call_llm(
         GENERATION_SYSTEM,
         f"PASSAGES:\n{passages_block}\n\nQUESTION: {question}",
     )
 
-    # 3. Verify.
+    # 4. Verify.
     supported, unsupported = _verify(draft, passages_block)
     if not supported:
         return Answer(
