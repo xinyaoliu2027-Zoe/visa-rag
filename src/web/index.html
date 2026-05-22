@@ -112,6 +112,15 @@
     padding: 2px 9px; font-size: 0.78rem; font-weight: 600; white-space: nowrap;
   }
   .date-iso { color: var(--muted); font-size: 0.82rem; }
+  .suggestion {
+    background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 10px;
+    padding: 12px 14px; margin-top: 16px; font-size: 0.9rem;
+  }
+  .suggestion button { padding: 6px 14px; font-size: 0.85rem; margin-left: 8px; }
+  .suggestion button.ghost {
+    background: transparent; color: var(--muted); border: 1px solid var(--line);
+  }
+  .suggestion button.ghost:hover { background: #f3f4f6; }
 </style>
 </head>
 <body>
@@ -174,6 +183,11 @@
     <div id="citations" class="citations" style="display:none;">
       <h4>Sources</h4>
       <div id="citeList"></div>
+    </div>
+    <div id="suggestion" class="suggestion" style="display:none;">
+      <span id="suggestionText"></span>
+      <button onclick="applySuggestion()">Update my case</button>
+      <button class="ghost" onclick="dismissSuggestion()">Dismiss</button>
     </div>
   </div>
 
@@ -250,6 +264,7 @@ async function ask() {
     } else {
       citeBox.style.display = 'none';
     }
+    showSuggestion(data.profile_suggestion);
     result.style.display = 'block';
     status.textContent = '';
   } catch (err) {
@@ -330,6 +345,33 @@ function renderProgress(p) {
   }
 
   document.getElementById('progress').style.display = 'block';
+}
+
+// --- Conversation-driven case suggestions ---
+
+let pendingSuggestion = null;
+
+function showSuggestion(s) {
+  pendingSuggestion = s || null;
+  const box = document.getElementById('suggestion');
+  if (!pendingSuggestion) { box.style.display = 'none'; return; }
+  document.getElementById('suggestionText').textContent = pendingSuggestion.message + ' ';
+  box.style.display = 'block';
+}
+
+function dismissSuggestion() {
+  pendingSuggestion = null;
+  document.getElementById('suggestion').style.display = 'none';
+}
+
+async function applySuggestion() {
+  if (!pendingSuggestion) { return; }
+  const c = pendingSuggestion.changes || {};
+  if (c.program_end_date) { document.getElementById('progEnd').value = c.program_end_date; }
+  if (c.is_stem_eligible) { document.getElementById('isStem').checked = true; }
+  if (c.current_stage) { document.getElementById('stage').value = c.current_stage; }
+  dismissSuggestion();
+  await saveProfile();   // persists the change and refreshes the progress view
 }
 
 loadProfile();

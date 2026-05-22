@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 WEB_DIR = Path(__file__).parent / "web"
 
 from src.generation.rag import Answer, generate_answer
+from src.profile.infer import build_suggestion, detect_signals
 from src.profile.progress import compute_progress
 from src.profile.store import get_profile, save_profile
 from src.rules.opt_timeline import TimelineInput, compute_timeline
@@ -50,6 +51,7 @@ class AskResponse(BaseModel):
     text: str
     confidence: str
     citations: list[CitationOut]
+    profile_suggestion: dict | None = None
     disclaimer: str = (
         "This is informational only, not legal advice. "
         "Verify with your DSO and a licensed immigration attorney before acting."
@@ -93,6 +95,14 @@ def health() -> dict:
 @app.post("/ask", response_model=AskResponse)
 def ask(req: AskRequest) -> AskResponse:
     ans: Answer = generate_answer(req.question)
+
+    # If the user has a profile, check whether this message reveals a case
+    # update worth suggesting (detection only — the user confirms in the UI).
+    profile = get_profile()
+    suggestion = None
+    if profile is not None:
+        suggestion = build_suggestion(detect_signals(req.question), profile)
+
     return AskResponse(
         mode=ans.mode,
         text=ans.text,
@@ -107,6 +117,7 @@ def ask(req: AskRequest) -> AskResponse:
             )
             for c in ans.citations
         ],
+        profile_suggestion=suggestion,
     )
 
 
