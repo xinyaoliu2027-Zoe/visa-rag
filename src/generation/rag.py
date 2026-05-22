@@ -1,13 +1,15 @@
-"""RAG generation with inline citations and post-generation self-check.
+"""RAG generation with inline citations, post-generation self-check, and
+timeline routing.
 
-Key design choices:
-  - Refuse if rerank score of top hit < MIN_RELEVANCE_SCORE.
-  - Force the model to emit [n] citations referring to passages.
-  - After generation, ask the model to verify every claim is supported by
-    a cited passage. If verification fails, fall back to refusal.
+Flow of `generate_answer`:
+  1. Classify intent. If the question is about computing specific dates /
+     deadlines for an individual, route to the deterministic timeline engine
+     (LLM understands the question, the rules engine does the date math).
+  2. Otherwise run normal RAG: retrieve -> rerank -> generate -> self-check.
 
-`generate_answer` returns a structured Answer so the API layer can render
-citations and confidence labels.
+Design principle: the LLM never computes dates. It only (a) classifies intent
+and (b) extracts the program end date from natural language. All date
+arithmetic happens in src.rules.opt_timeline, which is deterministic.
 """
 
 from __future__ import annotations
@@ -16,12 +18,14 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from datetime import date
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
 from src.retrieval.hybrid_search import Hit, hybrid_search
 from src.retrieval.rerank import maybe_rerank
+from src.rules.opt_timeline import TimelineInput, compute_timeline
 
 load_dotenv()
 
@@ -57,6 +61,29 @@ Guidance:
   be found in any passage, and list those claims."""
 
 
+INTENT_SYSTEM = """You classify a user's question about F-1 student visa / OPT.
+
+Respond with ONLY a JSON object — no code fences, no commentary:
+{"intent": "timeline"} or {"intent": "general"}
+
+- "timeline": the question asks to compute specific calendar dates, deadlines,
+  or filing windows for an individual — e.g. "when can I file for OPT",
+  "what is my OPT application deadline", "when must I file my STEM extension".
+- "general": questions about rules, eligibility, definitions, or how something
+  works — e.g. "how long is post-completion OPT", "who can work off campus"."""
+
+
+EXTRACT_SYSTEM = """Extract timeline parameters from a user's question about OPT.
+
+Respond with ONLY a JSON object — no code fences, no commentary:
+{"program_end_date": "YYYY-MM-DD", "is_stem_eligible": false}
+
+- program_end_date: the student's program completion / graduation date if the
+  question states one (in any format); otherwise null.
+- is_stem_eligible: true only if the student indicates a STEM degree or asks
+  about the STEM OPT extension; otherwise false."""
+
+
 @dataclass
 class Citation:
     n: int
@@ -68,7 +95,7 @@ class Citation:
 
 @dataclass
 class Answer:
-    mode: str               # "answered" | "refused" | "needs_timeline_tool"
+    mode: str               # "answered" | "timeline" | "needs_dates" | "refused"
     text: str
     citations: list[Citation]
     confidence: str         # "high" | "medium" | "low"
@@ -82,21 +109,15 @@ def _format_passages(hits: list[Hit]) -> str:
     )
 
 
-def _call_llm(system: str, user: str, max_tokens: int = 600,
-              prefill: str | None = None) -> str:
-    """Call the LLM. If `prefill` is given, the assistant reply is forced to
-    begin with it — used to coerce clean JSON output from the verifier."""
-    messages: list[dict] = [{"role": "user", "content": user}]
-    if prefill:
-        messages.append({"role": "assistant", "content": prefill})
+def _call_llm(system: str, user: str, max_tokens: int = 600) -> str:
+    """Call the LLM with a single user message."""
     msg = ANTHROPIC.messages.create(
         model=LLM_MODEL,
         max_tokens=max_tokens,
         system=system,
-        messages=messages,
+        messages=[{"role": "user", "content": user}],
     )
-    text = msg.content[0].text.strip()
-    return (prefill + text) if prefill else text
+    return msg.content[0].text.strip()
 
 
 def _extract_json(raw: str) -> dict | None:
@@ -114,6 +135,98 @@ def _extract_json(raw: str) -> dict | None:
     return None
 
 
+# --- Intent classification + timeline routing --------------------------------
+
+def _classify_intent(question: str) -> str:
+    """Return "timeline" or "general". Defaults to "general" on any uncertainty."""
+    raw = _call_llm(INTENT_SYSTEM, question, max_tokens=50)
+    data = _extract_json(raw)
+    if data and data.get("intent") == "timeline":
+        return "timeline"
+    return "general"
+
+
+def _extract_timeline_params(question: str) -> dict | None:
+    """Pull {program_end_date, is_stem_eligible} from the question via the LLM."""
+    raw = _call_llm(EXTRACT_SYSTEM, question, max_tokens=100)
+    return _extract_json(raw)
+
+
+def _format_timeline_answer(result, is_stem: bool) -> str:
+    """Render a deterministic TimelineResult into readable text. No LLM here."""
+    lines = ["## Your OPT Timeline (estimated)", "", result.summary, "",
+             "Key dates and deadlines:"]
+    for m in result.milestones:
+        parts = []
+        if m.earliest:
+            parts.append(f"earliest {m.earliest.isoformat()}")
+        if m.latest:
+            parts.append(f"latest {m.latest.isoformat()}")
+        when = "; ".join(parts) if parts else "see note"
+        lines.append(f"- {m.label}: {when}  [{m.regulatory_citation}]")
+        if m.notes:
+            lines.append(f"    Note: {m.notes}")
+    if not is_stem:
+        lines.append("")
+        lines.append("(If you hold an eligible STEM degree, ask again mentioning "
+                      "STEM to also see the 24-month extension dates.)")
+    lines.append("")
+    lines.append("These dates are computed directly from the cited regulations. "
+                 "USCIS may exercise discretion outside the regulatory window. "
+                 "This is informational only, not legal advice. Verify with your DSO.")
+    return "\n".join(lines)
+
+
+def _answer_timeline(question: str) -> Answer:
+    """Handle a timeline question: extract the date, run the rules engine."""
+    params = _extract_timeline_params(question)
+    end_date_str = params.get("program_end_date") if params else None
+
+    if not end_date_str:
+        return Answer(
+            mode="needs_dates",
+            text=(
+                "To compute your OPT deadlines I need your program completion date. "
+                "Please ask again and include it — for example: "
+                '"I finish my program on 2026-12-18, when can I file for OPT?" '
+                "This is informational only, not legal advice."
+            ),
+            citations=[],
+            confidence="low",
+            debug={"reason": "no_date_in_question", "params": params},
+        )
+
+    try:
+        program_end = date.fromisoformat(str(end_date_str))
+    except ValueError:
+        return Answer(
+            mode="needs_dates",
+            text=(
+                f"I couldn't read \"{end_date_str}\" as a valid date. Please ask again "
+                "with a clear program completion date, e.g. 2026-12-18. "
+                "This is informational only, not legal advice."
+            ),
+            citations=[],
+            confidence="low",
+            debug={"reason": "unparseable_date", "raw": end_date_str},
+        )
+
+    is_stem = bool(params.get("is_stem_eligible")) if params else False
+    result = compute_timeline(TimelineInput(
+        program_end_date=program_end,
+        is_stem_eligible=is_stem,
+    ))
+    return Answer(
+        mode="timeline",
+        text=_format_timeline_answer(result, is_stem),
+        citations=[],
+        confidence="high",
+        debug={"program_end_date": program_end.isoformat(), "is_stem_eligible": is_stem},
+    )
+
+
+# --- Self-check ---------------------------------------------------------------
+
 def _verify(answer: str, passages: str) -> tuple[bool, list[str]]:
     """Ask the model whether the answer is grounded. Conservative on parse failure."""
     raw = _call_llm(
@@ -127,7 +240,13 @@ def _verify(answer: str, passages: str) -> tuple[bool, list[str]]:
     return bool(data.get("supported")), list(data.get("unsupported_claims", []))
 
 
+# --- Orchestration ------------------------------------------------------------
+
 def generate_answer(question: str) -> Answer:
+    # 0. Route date/deadline questions to the deterministic timeline engine.
+    if _classify_intent(question) == "timeline":
+        return _answer_timeline(question)
+
     # 1. Retrieve.
     raw_hits = hybrid_search(question, top_k=int(os.environ.get("RETRIEVAL_TOP_K", "20")))
     hits = maybe_rerank(question, raw_hits, top_k=int(os.environ.get("RERANK_TOP_K", "6")))
@@ -219,7 +338,7 @@ if __name__ == "__main__":
     for c in ans.citations:
         print(f"  [{c.n}] {c.publisher} (Tier {c.tier}) — {c.section_path}")
         print(f"        {c.source_url}")
-    if ans.mode != "answered":
+    if ans.mode == "refused":
         print("\n--- debug ---")
         for k, v in ans.debug.items():
             print(f"{k}: {v}")
