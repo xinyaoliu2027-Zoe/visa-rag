@@ -1,0 +1,65 @@
+# Visa RAG — local dev stack
+#
+# Usage:
+#   docker compose up -d              # start postgres + app
+#   docker compose logs -f app        # tail app logs
+#   docker compose exec app bash      # shell into app for running ingestion
+#   docker compose down               # stop (data persists in volume)
+#   docker compose down -v            # nuke everything including the DB
+#
+# The app container hot-reloads when you edit ./src on the host.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: visa_rag_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      # Files in /docker-entrypoint-initdb.d/ run once when the data dir is empty.
+      - ./db/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: visa_rag_app:dev
+    container_name: visa_rag_app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      # Override DATABASE_URL so the app reaches postgres over the compose network,
+      # regardless of what .env has (which may be set up for host-side dev).
+      DATABASE_URL: postgresql://postgres:dev@postgres:5432/postgres
+    ports:
+      - "8000:8000"
+    volumes:
+      # Bind-mount source for hot reload during dev.
+      - ./src:/app/src:ro
+      # Bind-mount data so ingestion scripts can read PDFs from the host.
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+
+volumes:
+  pg_data:
+    name: visa_rag_pg_data

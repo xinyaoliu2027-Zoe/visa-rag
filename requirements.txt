@@ -1,0 +1,32 @@
+# Core
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+pydantic==2.9.2
+python-dotenv==1.0.1
+
+# DB
+psycopg[binary]==3.2.3
+pgvector==0.3.6
+sqlalchemy==2.0.36
+
+# Ingestion
+unstructured[pdf]==0.16.5
+pypdf==5.1.0
+
+# Embeddings & retrieval
+sentence-transformers==3.3.1
+rank-bm25==0.2.2
+cohere==5.13.3
+
+# LLMs
+anthropic==0.40.0
+openai==1.57.4  # only if you swap embedding to OpenAI
+
+# Utilities
+tqdm==4.67.1
+tenacity==9.0.0
+httpx==0.28.1
+
+# Dev
+pytest==8.3.4
+ruff==0.8.4
