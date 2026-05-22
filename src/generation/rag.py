@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 
 from anthropic import Anthropic
@@ -25,7 +26,7 @@ from src.retrieval.rerank import maybe_rerank
 load_dotenv()
 
 ANTHROPIC = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-LLM_MODEL = os.environ.get("LLM_MODEL", "claude-3-5-sonnet-20241022")
+LLM_MODEL = os.environ.get("LLM_MODEL", "claude-sonnet-4-6")
 MIN_RELEVANCE = float(os.environ.get("MIN_RELEVANCE_SCORE", "0.35"))
 
 
@@ -40,13 +41,20 @@ Strict rules:
 6. Tone: clear, plain, ~150 words or less."""
 
 
-VERIFICATION_SYSTEM = """You verify whether an answer is fully grounded in the cited passages.
+VERIFICATION_SYSTEM = """You verify whether an answer is grounded in the cited passages.
 
-Given an ANSWER and the PASSAGES it was based on, return JSON of the form:
-{"supported": true|false, "unsupported_claims": ["..."]}
+Given an ANSWER and the PASSAGES it was based on, decide whether every factual
+claim in the answer can be supported by one of the passages.
 
-A claim is unsupported if it cannot be directly read off one of the cited passages.
-Citing prior knowledge counts as unsupported. Be strict."""
+Respond with ONLY a JSON object — no code fences, no commentary:
+{"supported": true, "unsupported_claims": []}
+
+Guidance:
+- Minor paraphrasing or summarizing of passage content counts as supported.
+- The closing disclaimer sentence ("This is informational only...") is always
+  supported — never flag it.
+- Set "supported" to false only if a substantive factual claim genuinely cannot
+  be found in any passage, and list those claims."""
 
 
 @dataclass
@@ -74,28 +82,49 @@ def _format_passages(hits: list[Hit]) -> str:
     )
 
 
-def _call_llm(system: str, user: str, max_tokens: int = 600) -> str:
+def _call_llm(system: str, user: str, max_tokens: int = 600,
+              prefill: str | None = None) -> str:
+    """Call the LLM. If `prefill` is given, the assistant reply is forced to
+    begin with it — used to coerce clean JSON output from the verifier."""
+    messages: list[dict] = [{"role": "user", "content": user}]
+    if prefill:
+        messages.append({"role": "assistant", "content": prefill})
     msg = ANTHROPIC.messages.create(
         model=LLM_MODEL,
         max_tokens=max_tokens,
         system=system,
-        messages=[{"role": "user", "content": user}],
+        messages=messages,
     )
-    return msg.content[0].text.strip()
+    text = msg.content[0].text.strip()
+    return (prefill + text) if prefill else text
+
+
+def _extract_json(raw: str) -> dict | None:
+    """Parse a JSON object out of an LLM response, tolerating code fences/prose."""
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return None
+    return None
 
 
 def _verify(answer: str, passages: str) -> tuple[bool, list[str]]:
+    """Ask the model whether the answer is grounded. Conservative on parse failure."""
     raw = _call_llm(
         VERIFICATION_SYSTEM,
-        f"PASSAGES:\n{passages}\n\nANSWER:\n{answer}\n\nReturn JSON only.",
+        f"PASSAGES:\n{passages}\n\nANSWER:\n{answer}",
         max_tokens=300,
     )
-    try:
-        data = json.loads(raw)
-        return bool(data.get("supported")), list(data.get("unsupported_claims", []))
-    except (json.JSONDecodeError, AttributeError):
-        # If we can't parse, be conservative — treat as unsupported.
-        return False, ["verifier returned unparseable output"]
+    data = _extract_json(raw)
+    if data is None:
+        return False, [f"verifier output could not be parsed: {raw[:200]}"]
+    return bool(data.get("supported")), list(data.get("unsupported_claims", []))
 
 
 def generate_answer(question: str) -> Answer:
@@ -190,3 +219,7 @@ if __name__ == "__main__":
     for c in ans.citations:
         print(f"  [{c.n}] {c.publisher} (Tier {c.tier}) — {c.section_path}")
         print(f"        {c.source_url}")
+    if ans.mode != "answered":
+        print("\n--- debug ---")
+        for k, v in ans.debug.items():
+            print(f"{k}: {v}")

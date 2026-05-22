@@ -7,16 +7,15 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;  -- for BM25-ish lexical search
 CREATE SCHEMA IF NOT EXISTS visa;
 
 -- A "document" is one logical source: e.g., USCIS Policy Manual Volume 2 Part F.
--- Different chapters of the same manual = different documents (for cleaner citation).
 CREATE TABLE IF NOT EXISTS visa.documents (
     id              SERIAL PRIMARY KEY,
     source_url      TEXT NOT NULL,
     title           TEXT NOT NULL,
     publisher       TEXT NOT NULL,                  -- USCIS / SEVP / DOS / NAFSA / OISS
     tier            SMALLINT NOT NULL CHECK (tier IN (1, 2)),  -- 1=authoritative, 2=practitioner
-    version_label   TEXT,                           -- e.g. "as of 2026-03-15"
+    version_label   TEXT,
     downloaded_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    sha256          TEXT NOT NULL,                  -- of the source file, for change detection
+    sha256          TEXT NOT NULL,
     UNIQUE (source_url, sha256)
 );
 
@@ -24,22 +23,26 @@ CREATE TABLE IF NOT EXISTS visa.documents (
 CREATE TABLE IF NOT EXISTS visa.chunks (
     id              BIGSERIAL PRIMARY KEY,
     document_id     INTEGER NOT NULL REFERENCES visa.documents(id) ON DELETE CASCADE,
-    chunk_index     INTEGER NOT NULL,               -- ordinal within the document
-    section_path    TEXT NOT NULL,                  -- "Vol 2, Part F, Ch 5, §A.2"
+    chunk_index     INTEGER NOT NULL,
+    section_path    TEXT NOT NULL,
     page_start      INTEGER,
     page_end        INTEGER,
     text            TEXT NOT NULL,
     token_count     INTEGER NOT NULL,
-    embedding       vector(768),                    -- BGE-base-en-v1.5 dimensionality
+    embedding       vector(768),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (document_id, chunk_index)
 );
 
--- IVFFlat for dense ANN. Tune lists ~ sqrt(rows). For ~5k chunks, lists=64 is fine.
-CREATE INDEX IF NOT EXISTS idx_chunks_embedding_cos
-    ON visa.chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 64);
+-- HNSW index for dense vector (cosine) search.
+-- NOTE: we deliberately use HNSW rather than IVFFlat. IVFFlat partitions
+-- vectors into "lists" and probes only a few per query, so on a small corpus
+-- most lists are empty and queries return too few — or zero — results.
+-- HNSW has no such warm-up requirement and works well at any corpus size.
+CREATE INDEX IF NOT EXISTS idx_chunks_embedding_hnsw
+    ON visa.chunks USING hnsw (embedding vector_cosine_ops);
 
--- Trigram for cheap lexical filter (acts as light BM25 surrogate).
+-- Trigram index for cheap lexical filtering.
 CREATE INDEX IF NOT EXISTS idx_chunks_text_trgm
     ON visa.chunks USING gin (text gin_trgm_ops);
 
@@ -53,7 +56,7 @@ CREATE TABLE IF NOT EXISTS visa.ingestion_runs (
     finished_at     TIMESTAMPTZ,
     document_id     INTEGER REFERENCES visa.documents(id),
     chunks_inserted INTEGER NOT NULL DEFAULT 0,
-    status          TEXT NOT NULL DEFAULT 'running', -- running | completed | failed
+    status          TEXT NOT NULL DEFAULT 'running',
     notes           TEXT
 );
 
@@ -74,6 +77,3 @@ SELECT
     d.version_label   AS version_label
 FROM visa.chunks c
 JOIN visa.documents d ON d.id = c.document_id;
-
--- Smoke test (uncomment after your first ingestion run):
--- SELECT publisher, COUNT(*) FROM visa.v_chunks_with_source GROUP BY publisher;
